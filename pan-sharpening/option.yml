@@ -8,7 +8,7 @@
 name: Net
 algorithm: panmamba_baseline_finalversion #maunetv4_ns #ugcn_s4nba0  pan_unfolding_v4
 nEpochs: 500
-gpu_mode: True
+gpu_mode: False
 save_best: True
 gpus: [0]
 threads:  4 #num_works
@@ -21,8 +21,8 @@ checkpoint: pan-sharpening/checkpoint
 #data_dir_eval: /media/manman/data_disk/pancode/WV2_data/test128
 #data_dir_train: /media/manman/data_disk/pancode/F2_data/train128
 #data_dir_eval: /media/manman/data_disk/pancode/GF2_data/test128
-data_dir_train: pan-sharpening/yaogan/WV2_data/test128
-data_dir_eval: pan-sharpening/yaogan/WV2_data/test128
+data_dir_train: /root/yaogan/WV2_data/test128
+data_dir_eval: /root/yaogan/WV2_data/test128
 
 source_ms: ms
 source_pan: pan

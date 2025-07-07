@@ -16,7 +16,7 @@ import argparse
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='N_SR')
-    parser.add_argument('--option_path', type=str, default='/home/hexuanhua/src/sr/pan-sharpening/option.yml')
+    parser.add_argument('--option_path', type=str, default='/root/Project/PanGlobal-Mamba/pan-sharpening/option.yml')
     opt = parser.parse_args()
     cfg = get_config(opt.option_path)
     solver = Solver(cfg)
