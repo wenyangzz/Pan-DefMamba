@@ -8,7 +8,7 @@
 name: Net
 algorithm: panmamba_baseline_finalversion #maunetv4_ns #ugcn_s4nba0  pan_unfolding_v4
 nEpochs: 500
-gpu_mode: False
+gpu_mode: True
 save_best: True
 gpus: [0]
 threads:  4 #num_works
