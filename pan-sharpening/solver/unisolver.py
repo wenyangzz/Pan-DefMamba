@@ -155,7 +155,7 @@ class Solver(BaseSolver):
         # self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer,1000,5e-8)
         # self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, 20, 0)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer,500,1,5e-8)
-        self.log_name = self.cfg['algorithm'] + '_' + str(self.cfg['data']['upsacle']) + '_' + str(self.timestamp)
+        self.log_name = self.cfg['algorithm'] + '_' + str(self.cfg['data']['upsacle']) + '_' + str(self.now_time)
         # save log
         self.writer = SummaryWriter(self.cfg['log_dir']+ str(self.log_name))
         save_net_config(self.log_name, self.model)

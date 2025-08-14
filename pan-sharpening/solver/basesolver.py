@@ -6,7 +6,7 @@
 LastEditTime: 2020-11-25 19:24:54
 @Description: file content
 '''
-import os, torch, time
+import os, torch, time, datetime
 from utils.utils import save_config
 from data.dataset import data
 from data.data import get_data,get_test_data
@@ -22,7 +22,7 @@ class BaseSolver:
         self.epoch = 1
 
         self.timestamp = int(time.time())
-
+        self.now_time = datetime.datetime.now().strftime("%m-%d-%H-%M")
         if cfg['gpu_mode']:
             self.num_workers = cfg['threads']
         else:

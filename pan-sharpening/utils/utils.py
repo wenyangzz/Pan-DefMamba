@@ -142,12 +142,12 @@ def get_path(subdir):
     return os.path.join(subdir)
 
 def save_config(time, log):
-    open_type = 'a' if os.path.exists(get_path('./log/' + str(time) + '/records.txt'))else 'w'
+    open_type = 'a' if os.path.exists(get_path('pan-sharpening/log/' + str(time) + '/records.txt'))else 'w'
     log_file = open(get_path('pan-sharpening/log/' + str(time) + '/records.txt'), open_type)
     log_file.write(str(log) + '\n')
 
 def save_net_config(time, log):
-    open_type = 'a' if os.path.exists(get_path('./log/' + str(time) + '/net.txt'))else 'w'
+    open_type = 'a' if os.path.exists(get_path('pan-sharpening/log/' + str(time) + '/net.txt'))else 'w'
     log_file = open(get_path('pan-sharpening/log/' + str(time) + '/net.txt'), open_type)
     log_file.write(str(log) + '\n')
 
