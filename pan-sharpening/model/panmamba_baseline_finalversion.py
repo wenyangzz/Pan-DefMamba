@@ -221,7 +221,7 @@ class CrossMamba(nn.Module):
         pan = self.norm2(pan)
         global_f = self.cross_mamba(self.norm1(ms),extra_emb=self.norm2(pan))
         B,HW,C = global_f.shape
-        ms = global_f.transpose(1, 2).view(B, C, 128*8, 128*8)
+        ms = global_f.transpose(1, 2).view(B, C, 128, 128) 
         ms =  (self.dwconv(ms)+ms).flatten(2).transpose(1, 2)
         return ms,ms_resi
 class HinResBlock(nn.Module):
@@ -271,25 +271,32 @@ class Net(nn.Module):
         self.output = Refine(base_filter,4)
     def forward(self,ms,_,pan):
 
-        ms_bic = F.interpolate(ms,scale_factor=4)
-        ms_f = self.ms_encoder(ms_bic)
+        ms_bic = F.interpolate(ms,scale_factor=4) #upsampling 
+        ms_f = self.ms_encoder(ms_bic)#([4, 32, 128, 128])
         # ms_f = ms_bic
         # pan_f = pan
         b,c,h,w = ms_f.shape
-        pan_f = self.pan_encoder(pan)
-        ms_f = self.ms_to_token(ms_f)
-        pan_f = self.pan_to_token(pan_f)
+        pan_f = self.pan_encoder(pan) #([4, 32, 128, 128])
+        ms_f = self.ms_to_token(ms_f) # feature flatten ([4, 16384, 32])
+        pan_f = self.pan_to_token(pan_f) 
+        
         residual_ms_f = 0
-        residual_pan_f = 0
-        ms_f,residual_ms_f = self.ms_feature_extraction([ms_f,residual_ms_f])
+        residual_pan_f = 0 
+        ms_f,residual_ms_f = self.ms_feature_extraction([ms_f,residual_ms_f]) #mamba feature_extraction ([4, 16384, 32])
         pan_f,residual_pan_f = self.pan_feature_extraction([pan_f,residual_pan_f])
+        # print("ms_f1.shape",ms_f.shape)
+        # print("pan_f2.shape",pan_f.shape)
+        # print("residual_ms_f1.shape",residual_ms_f.shape)
         ms_f,pan_f,residual_ms_f,residual_pan_f = self.swap_mamba1(ms_f,pan_f,residual_ms_f,residual_pan_f)
         ms_f,pan_f,residual_ms_f,residual_pan_f = self.swap_mamba2(ms_f,pan_f,residual_ms_f,residual_pan_f)
-        ms_f = self.patchunembe(ms_f,(h,w))
-        pan_f = self.patchunembe(pan_f,(h,w))
+        ms_f = self.patchunembe(ms_f,(h,w)) 
+        pan_f = self.patchunembe(pan_f,(h,w)) #([4, 32, 128, 128])
+        # print("ms_f2.shape",ms_f.shape)
+        # print("pan_f2.shape",pan_f.shape)
+        # print("residual_ms_f2.shape",residual_ms_f.shape)
         ms_f = self.shallow_fusion1(torch.concat([ms_f,pan_f],dim=1))+ms_f
-        pan_f = self.shallow_fusion2(torch.concat([pan_f,ms_f],dim=1))+pan_f
-        ms_f = self.ms_to_token(ms_f)
+        pan_f = self.shallow_fusion2(torch.concat([pan_f,ms_f],dim=1))+pan_f #([4, 32, 128, 128])
+        ms_f = self.ms_to_token(ms_f) # feature flatten ([4, 16384, 32])
         pan_f = self.pan_to_token(pan_f)
         residual_ms_f = 0
         ms_f,residual_ms_f = self.deep_fusion1(ms_f,residual_ms_f,pan_f)
