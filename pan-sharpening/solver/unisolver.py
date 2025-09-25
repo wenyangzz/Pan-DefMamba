@@ -341,10 +341,14 @@ class Solver(BaseSolver):
         try:
             while self.epoch <= self.nEpochs:
                 self.train()
-                if self.epoch % 5 == 0:
+                if self.epoch <= 150:
+                    if self.epoch % 5 == 0:
+                        self.eval()
+                        self.save_checkpoint(epoch=self.epoch)
+                else:
                     self.eval()
-                    self.save_checkpoint(epoch=self.epoch)
-                self.epoch += 1
+                    self.save_checkpoint(epoch=self.epoch)     
+                self.epoch += 1 
         except KeyboardInterrupt:
             self.save_checkpoint(epoch=self.epoch)
         save_config(self.log_name, 'Training done.')

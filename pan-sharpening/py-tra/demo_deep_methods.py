@@ -48,9 +48,9 @@ def cal(ref, noref):
     noreflist.append(np.mean([ih[2] for ih in noref]))
     return reflist, noreflist
 
-path_ms = "pan-sharpening/yaogan/GF2_data/test128/ms"
-path_pan = "pan-sharpening/yaogan/GF2_data/test128/pan"
-path_predict = "pan-sharpening/result/mamba_gf2/test"
+path_ms = "/root/yaogan/WV2_data/test128/ms"
+path_pan = "/root/yaogan/WV2_data/test128/pan"
+path_predict = "../pan-sharpening/result/defmambawv2/test"
 
 list_name = []
 for file_path in os.listdir(path_ms):
@@ -66,7 +66,7 @@ for file_name_i in list_name:
     path_ms_file = os.path.join(path_ms, file_name_i)
     path_pan_file = os.path.join(path_pan, file_name_i)
     path_predict_file = os.path.join(path_predict, file_name_i)
-    # print(path_ms_file,path_pan_file)
+    print("path_predict_file",path_predict_file)
 
     original_msi = np.array(Image.open(path_ms_file))
     original_pan = np.array(Image.open(path_pan_file))

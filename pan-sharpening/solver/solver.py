@@ -142,7 +142,7 @@ class Solver(BaseSolver):
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer,500,5e-8)
         # self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, 20, 0)
         # self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer,500,1,5e-8)
-        self.log_name = self.cfg['algorithm'] + '_' + str(self.cfg['data']['upsacle']) + '_' + str(self.timestamp)
+        self.log_name = self.cfg['algorithm'] + '_' + str(self.cfg['data']['upsacle']) + '_' + str(self.now_time)
         # save log
         self.writer = SummaryWriter(self.cfg['log_dir']+ str(self.log_name))
         save_net_config(self.log_name, self.model)
@@ -405,9 +405,14 @@ class Solver(BaseSolver):
         try:
             while self.epoch <= self.nEpochs:
                 self.train()
-                self.eval()
-                self.save_checkpoint(epoch=self.epoch)
-                self.epoch += 1
+                if self.epoch <= 150:
+                    if self.epoch % 5 == 0:
+                        self.eval()
+                        self.save_checkpoint(epoch=self.epoch)
+                else:
+                    self.eval()
+                    self.save_checkpoint(epoch=self.epoch)     
+                self.epoch += 1 
         except KeyboardInterrupt:
             self.save_checkpoint(epoch=self.epoch)
         save_config(self.log_name, 'Training done.')

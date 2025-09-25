@@ -583,12 +583,12 @@ class DeformableStateSpaceModel(nn.Module):
         
         #前向和后向扫描
         self.forward_scanning = lambda x: x.flatten(2).permute(0, 2, 1)  # [B, H*W, C]
-        self.backward_scanning = lambda x: x.flip(2).flatten(2).permute(0, 2, 1)  # 反向
+        #self.backward_scanning = lambda x: x.flip(2).flatten(2).permute(0, 2, 1)  # 反向
         
         # 三个分支的SSM
         self.forward_ssm = Mamba(d_model, bimamba_type=None)
-        self.backward_ssm = Mamba(d_model, bimamba_type=None)
-        self.deformable_ssm = Mamba(d_model, bimamba_type=None)
+        #self.backward_ssm = Mamba(d_model, bimamba_type=None)
+        #self.deformable_ssm = Mamba(d_model, bimamba_type=None)
         
         # 激活和归一化 - 修复LayerNorm维度问题
         self.silu = nn.SiLU()
@@ -619,29 +619,30 @@ class DeformableStateSpaceModel(nn.Module):
         #ms = self.proj(ms)
 
         # 生成偏移
-        delta_p, delta_t = self.offset_network(x_dw)
+        #delta_p, delta_t = self.offset_network(x_dw)
         
         # 可变形扫描分支
-        deformable_seq = self.deformable_scanning(x_dw, delta_p, delta_t)  # [B, L, C]
-        deformable_out = self.deformable_ssm(deformable_seq)  # [B, L, C]
+        #deformable_seq = self.deformable_scanning(x_dw, delta_p, delta_t)  # [B, L, C]
+        #deformable_out = self.deformable_ssm(deformable_seq)  # [B, L, C]
         
         # 前向扫描分支
         forward_seq = self.forward_scanning(x_dw)  # [B, L, C]
         forward_out = self.forward_ssm(forward_seq)  # [B, L, C]
         
         # 后向扫描分支
-        backward_seq = self.backward_scanning(x_dw)  # [B, L, C]
-        backward_out = self.backward_ssm(backward_seq)  # [B, L, C]
+        #backward_seq = self.backward_scanning(x_dw)  # [B, L, C]
+        #backward_out = self.backward_ssm(backward_seq)  # [B, L, C]
         #out = forward_out.permute(0, 2, 1).view(b, c, h, w)
         
         #out = self.ln(merged)
         # 分支融合
-        gate = self.gate(ms)
-        merged =  (forward_out + backward_out + deformable_out) / 3 
+        #gate = self.gate(ms)
+        #merged =  (forward_out + backward_out + deformable_out) / 3 
         #merged =  (forward_out + backward_out ) / 2
+        merged =  forward_out
         # # 恢复空间形状
         merged = merged.permute(0, 2, 1).view(b, c, h, w)  # [B, C, H, W]
-        merged =  merged * gate 
+        #merged =  merged * gate 
         out = merged 
         # merged = merged.permute(0, 2, 3, 1)  # [B, H, W, C]
         # out = self.ln(merged)  
@@ -859,8 +860,8 @@ class Net(nn.Module):
         # self.pan_feature_extraction3 = SingleMambaBlock(self.embed_dim)
         # self.pan_feature_extraction4 = SingleMambaBlock(self.embed_dim)
         # self.pan_feature_extraction5 = SingleMambaBlock(self.embed_dim)
-        self.swap_mamba1 = TokenSwapMamba1(self.embed_dim)
-        self.swap_mamba2 = TokenSwapMamba1(self.embed_dim)
+        #self.swap_mamba1 = TokenSwapMamba1(self.embed_dim)
+        #self.swap_mamba2 = TokenSwapMamba1(self.embed_dim)
         self.patchunembe = PatchUnEmbed(base_filter)
         self.output = Refine(base_filter,4)
     def forward(self,ms,_,pan):
@@ -871,6 +872,7 @@ class Net(nn.Module):
         # pan_f = pan
         b,c,h,w = ms_f.shape
         pan_f = self.pan_encoder(pan) #([4, 32, 128, 128])
+
         # ms_f = self.ms_to_token(ms_f) # feature flatten ([4, 16384, 32])
         # pan_f = self.pan_to_token(pan_f) 
         
@@ -879,15 +881,17 @@ class Net(nn.Module):
 
         ms_f, residual_ms_f = self.ms_feature_extraction2([ms_f, residual_ms_f])
         pan_f, residual_pan_f = self.pan_feature_extraction2([pan_f, residual_pan_f])
-      
-        ms_f = ms_f.flatten(2).transpose(1, 2)
-        pan_f = pan_f.flatten(2).transpose(1, 2)
-        residual_ms_f = residual_ms_f.flatten(2).transpose(1, 2)
-        residual_pan_f = residual_pan_f.flatten(2).transpose(1, 2)
+        
+        # ms_f = ms_f.flatten(2).transpose(1, 2)
+        # pan_f = pan_f.flatten(2).transpose(1, 2)
+        # residual_ms_f = residual_ms_f.flatten(2).transpose(1, 2)
+        # residual_pan_f = residual_pan_f.flatten(2).transpose(1, 2)
         # ms_f = self.ms_to_token(ms_f) # feature flatten ([4, 16384, 32])
         # pan_f = self.pan_to_token(pan_f) 
+
         # residual_ms_f = self.pan_to_token(residual_ms_f) 
         # residual_pan_f = self.pan_to_token(residual_pan_f) 
+
         # residual_ms_f = 0
         # residual_pan_f = 0 
         # ms_f,residual_ms_f = self.ms_feature_extraction([ms_f,residual_ms_f]) #mamba feature_extraction ([4, 16384, 32])
@@ -904,11 +908,11 @@ class Net(nn.Module):
         # print("ms_f1.shape",ms_f.shape)
         # print("pan_f2.shape",pan_f.shape)
         # print("residual_ms_f1.shape",residual_ms_f.shape)
-        ms_f,pan_f,residual_ms_f,residual_pan_f = self.swap_mamba1(ms_f,pan_f,residual_ms_f,residual_pan_f)
-        ms_f,pan_f,residual_ms_f,residual_pan_f = self.swap_mamba2(ms_f,pan_f,residual_ms_f,residual_pan_f)
+        # ms_f,pan_f,residual_ms_f,residual_pan_f = self.swap_mamba1(ms_f,pan_f,residual_ms_f,residual_pan_f)
+        # ms_f,pan_f,residual_ms_f,residual_pan_f = self.swap_mamba2(ms_f,pan_f,residual_ms_f,residual_pan_f)
         
-        ms_f = self.patchunembe(ms_f,(h,w)) 
-        pan_f = self.patchunembe(pan_f,(h,w)) #([4, 32, 128, 128])
+        # ms_f = self.patchunembe(ms_f,(h,w)) 
+        # pan_f = self.patchunembe(pan_f,(h,w)) #([4, 32, 128, 128])
        
         # print("residual_ms_f2.shape",residual_ms_f.shape)
         ms_f = self.shallow_fusion1(torch.concat([ms_f,pan_f],dim=1))+ms_f

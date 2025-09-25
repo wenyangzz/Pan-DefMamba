@@ -6,8 +6,8 @@
 # 
 
 name: Net
-algorithm: panmamba_baseline_finalversion #maunetv4_ns #ugcn_s4nba0  pan_unfolding_v4
-nEpochs: 500
+algorithm: vmamba #maunetv4_ns #ugcn_s4nba0  pan_unfolding_v4 defpanmaba vmamba panmamba_baseline_finalversion
+nEpochs: 200
 gpu_mode: True
 save_best: True
 gpus: [0]
@@ -21,7 +21,7 @@ checkpoint: pan-sharpening/checkpoint
 #data_dir_eval: /media/manman/data_disk/pancode/WV2_data/test128
 #data_dir_train: /media/manman/data_disk/pancode/F2_data/train128
 #data_dir_eval: /media/manman/data_disk/pancode/GF2_data/test128
-data_dir_train: /root/yaogan/WV2_data/test128
+data_dir_train: /root/yaogan/WV2_data/train128
 data_dir_eval: /root/yaogan/WV2_data/test128
 
 source_ms: ms
@@ -33,14 +33,14 @@ pretrain:
   pre_folder: ~
 
 test:  #用于指标测试的代码
-  algorithm: panmamba_baseline_finalversion #pannetffft
+  algorithm: vmamba #pannetffft
   type: test #[test, eval]
-  data_dir: pan-sharpening/yaogan/GF2_data/test128
+  data_dir: /root/yaogan/WV2_data/test128
   source_ms: ms
   source_pan: pan #moe_bal_4_1681220224
-  model: pan-sharpening/checkpoint/pretrained/Mamba/mambawv2/bestPSNR.pth
+  model: panmamba_baseline_finalversion_4_09-24-14-45/bestPSNR.pth
   #model: ugcn_s4nb_4_1630368984/best.pth
-  save_dir: pan-sharpening/result/mambawv2/
+  save_dir: pan-sharpening/result/defmambawv2/
 
 data:
   upsacle:  4
