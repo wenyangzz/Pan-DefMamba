@@ -66,7 +66,7 @@ for file_name_i in list_name:
     path_ms_file = os.path.join(path_ms, file_name_i)
     path_pan_file = os.path.join(path_pan, file_name_i)
     path_predict_file = os.path.join(path_predict, file_name_i)
-    print("path_predict_file",path_predict_file)
+    #print("path_predict_file",path_predict_file)
 
     original_msi = np.array(Image.open(path_ms_file))
     original_pan = np.array(Image.open(path_pan_file))
