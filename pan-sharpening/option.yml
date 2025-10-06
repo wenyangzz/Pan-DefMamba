@@ -6,7 +6,7 @@
 # 
 
 name: Net
-algorithm: vmamba #maunetv4_ns #ugcn_s4nba0  pan_unfolding_v4 defpanmaba vmamba panmamba_baseline_finalversion
+algorithm: defpanmaba #maunetv4_ns #ugcn_s4nba0  pan_unfolding_v4 defpanmaba vmamba panmamba_baseline_finalversion
 nEpochs: 200
 gpu_mode: True
 save_best: True
@@ -33,12 +33,12 @@ pretrain:
   pre_folder: ~
 
 test:  #用于指标测试的代码
-  algorithm: vmamba #pannetffft
+  algorithm: defpanmaba #pannetffft defpanmaba panmamba_baseline_finalversion
   type: test #[test, eval]
   data_dir: /root/yaogan/WV2_data/test128
   source_ms: ms
   source_pan: pan #moe_bal_4_1681220224
-  model: panmamba_baseline_finalversion_4_09-24-14-45/bestPSNR.pth
+  model: defpanmaba_4_10-01-09-44/bestPSNR.pth
   #model: ugcn_s4nb_4_1630368984/best.pth
   save_dir: pan-sharpening/result/defmambawv2/
 
