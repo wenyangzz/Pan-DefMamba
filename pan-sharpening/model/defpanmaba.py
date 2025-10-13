@@ -714,6 +714,61 @@ class DeformableLayer(nn.Module):
         x, indices = DeformablePathTrans.apply(x, path_pos) #B N C
         return x, indices
 
+class SharedDeformableLayer(nn.Module):
+    def __init__(self, index=0, embed_dim=32, h=0, w=0):
+        super().__init__()
+        self.ksize = [3, 3, 3, 3]
+        kk = self.ksize[index]
+        pad_size = kk // 2 if kk != 1 else 0
+        self.conv_offset = ConvOffset(embed_dim, kk, pad_size)
+        self.rpe_table = nn.Parameter(torch.zeros(embed_dim, 7, 7))
+        trunc_normal_(self.rpe_table, std=0.01)
+
+    @torch.no_grad()
+    def _get_ref_points(self, H, W, B, dtype, device):
+        ref_y, ref_x = torch.meshgrid(torch.linspace(0.5, H - 0.5, H, dtype=dtype, device=device), torch.linspace(0.5, W - 0.5, W, dtype=dtype, device=device), indexing='ij')
+        ref = torch.stack((ref_y, ref_x), -1)
+        ref[..., 1].div_(W - 1.0).mul_(2.0).sub_(1.0)
+        ref[..., 0].div_(H - 1.0).mul_(2.0).sub_(1.0)
+        return ref[None, ...].expand(B, -1, -1, -1)
+
+    @torch.no_grad()
+    def _get_path_ref_points(self, N, B, dtype, device):
+        ref_path = torch.linspace(0.5, N - 0.5, N, dtype=dtype, device=device)
+        ref_path = ref_path.div_(N - 1.0).mul_(2.0).sub_(1.0)
+        return ref_path[None, ...].expand(B, -1)
+
+    def forward(self, x_ms, x_pan):
+        dtype, device = x_ms.dtype, x_ms.device
+        B, C, H, W = x_ms.size()
+        N = H * W
+
+        # 1. 核心：只使用 x_ms 计算共享路径
+        offset_full = self.conv_offset(x_ms).contiguous()
+        offset, de_index = torch.split(offset_full, [2, 1], dim=1)
+        
+        Hk, Wk = offset.size(2), offset.size(3)
+        offset_range = torch.tensor([1.0 / (Hk - 1.0), 1.0 / (Wk - 1.0)], device=device).reshape(1, 2, 1, 1)
+        offset = offset.tanh().mul(offset_range)
+        pos = einops.rearrange(offset, 'b p h w -> b h w p') + self._get_ref_points(Hk, Wk, B, dtype, device)
+        path_pos = de_index.tanh().flatten(1) + self._get_path_ref_points(N, B, dtype, device)
+
+        # 2. 计算共享的相对位置偏置 (RPE)
+        rpe_table = self.rpe_table 
+        rpe_bias = rpe_table[None, ...].expand(B, -1, -1, -1)
+        rpe_bias = F.interpolate(rpe_bias, size=(H, W), mode='bilinear', align_corners=False)
+        displacement = (self._get_ref_points(H, W, B, dtype, device) - pos) * 0.5
+        pos_bias = F.grid_sample(rpe_bias, displacement[..., (1, 0)], mode='bilinear', align_corners=True)
+
+        # 3. 将共享路径和偏置分别应用于 ms 和 pan
+        ms_sampled = F.grid_sample(x_ms, pos[..., (1, 0)], mode='bilinear', align_corners=True) + pos_bias
+        pan_sampled = F.grid_sample(x_pan, pos[..., (1, 0)], mode='bilinear', align_corners=True) + pos_bias
+        
+        # 4. 使用 DeformablePathTrans 对两者进行相同的排序
+        ms_reordered, indices = DeformablePathTrans.apply(ms_sampled.flatten(2), path_pos)
+        pan_reordered, _ = DeformablePathTrans.apply(pan_sampled.flatten(2), path_pos) #B, N, C
+
+        return ms_reordered, pan_reordered, indices
 
 class DeformableLayerReverse(nn.Module):
     def __init__(self):
@@ -818,6 +873,108 @@ class DeformableStateSpaceModel(nn.Module):
         #out = linearms2(out)
         
         return out
+
+
+
+class CDeformableStateSpaceModel(nn.Module):
+    """完整的可变形状态空间模型"""
+    def __init__(self, d_model, kernel_size=3, expand=2):
+        super().__init__()
+        self.d_model = d_model
+        
+        #深度卷积代替1D卷积
+        self.dw_conv = nn.Conv2d(d_model, d_model, kernel_size=kernel_size,
+                                padding=kernel_size//2, groups=d_model)
+
+        self.dw_conv2 = nn.Conv2d(d_model, d_model, kernel_size=kernel_size,
+                                padding=kernel_size//2, groups=d_model)                        
+        self.proj = nn.Conv2d(d_model, d_model, kernel_size=1, stride=1)
+        self.proj2 = nn.Conv2d(d_model, d_model, kernel_size=1, stride=1)
+        #偏移网络
+        #self.offset_network = OffsetNetwork(d_model, kernel_size=kernel_size)
+        
+        #可变形扫描
+        self.deformable_scanning = SharedDeformableLayer(embed_dim=32)
+        self.DeformableLayerReverse = DeformableLayerReverse()
+        
+        #前向和后向扫描
+        self.forward_scanning = lambda x: x.flatten(2).permute(0, 2, 1)  # [B, H*W, C]
+        self.backward_scanning = lambda x: x.flatten(2).flip(2).permute(0, 2, 1)  # 反向 
+        
+        self.forward_ssm = Mamba(d_model, bimamba_type=None)
+        self.backward_ssm = Mamba(d_model, bimamba_type=None)
+        self.deformable_ssm = Mamba(d_model, bimamba_type=None)
+        
+        # 激活和归一化 - 修复LayerNorm维度问题
+        self.silu = nn.SiLU()
+        self.ln = nn.LayerNorm(d_model)  # 仅指定通道维度
+
+    def _interleave_sequences(self, seq1, seq2):
+        """交替拼接两个序列"""
+        # seq1, seq2 形状: [B, L, C]
+        B, L, C = seq1.shape
+        # 堆叠成 [B, L, 2, C] 再重塑为 [B, 2*L, C]
+        return torch.stack([seq1, seq2], dim=2).view(B, 2 * L, C)
+
+    def _deinterleave_sequence(self, merged_seq, L):
+        """将拼接后的序列分离"""
+        # merged_seq 形状: [B, 2*L, C]
+        B, _, C = merged_seq.shape
+        # 重塑为 [B, L, 2, C] 以便分离
+        reshaped_seq = merged_seq.view(B, L, 2, C)
+        # 分离出两个原始序列
+        seq1 = reshaped_seq[:, :, 0, :]
+        seq2 = reshaped_seq[:, :, 1, :]
+        return seq1, seq2
+
+    def forward(self, ms,pan):
+        # x: [B, C, H, W] 其中C = d_model
+        b, c, h, w = ms.shape
+        l = h*w
+        # 深度卷积处理
+         
+        x_dw = self.dw_conv(ms)
+        x_dw = self.silu(x_dw)
+
+        pan_dw = self.dw_conv2(pan)
+        pan_dw = self.silu(pan_dw)
+        x_dw = self.proj(x_dw)
+        pan_dw = self.proj2(pan_dw)
+        # 可变形扫描分支
+        #deformable_seq,indices = self.deformable_scanning(x_dw)  # [B, L, C]
+        ms_deformed, pan_deformed, shared_indices = self.deformable_scanning(x_dw, pan_dw)
+        deformable_seq = self._interleave_sequences(ms_deformed, pan_deformed)
+        deformable_out = self.deformable_ssm(deformable_seq)  # [B, L, C]
+        deformable_out_x, deformable_out_pan = self._deinterleave_sequence(deformable_out, l)# [B, L, C]
+        deformable_out_x = self.DeformableLayerReverse(deformable_out_x.transpose(dim0=1, dim1=2).contiguous(),shared_indices)
+        deformable_out_pan = self.DeformableLayerReverse(deformable_out_pan.transpose(dim0=1, dim1=2).contiguous(),shared_indices)
+
+        # 前向扫描分支
+        x_seq = self.forward_scanning(x_dw)
+        pan_seq = self.forward_scanning(pan_dw)
+
+        forward_seq = self._interleave_sequences(x_seq, pan_seq)  # [B, 2L, C]
+        forward_out = self.forward_ssm(forward_seq)  # [B, 2L, C]
+        forward_out_x, forward_out_pan = self._deinterleave_sequence(forward_out, l)# [B, L, C]
+        
+        # 后向扫描分支
+        x_seq_rev = x_seq.flip(1)
+        pan_seq_rev = pan_seq.flip(1)
+        backward_seq = self._interleave_sequences(x_seq_rev, pan_seq_rev) # [B, 2L, C]
+        backward_out = self.backward_ssm(backward_seq)  # [B, 2L, C]
+        backward_out_x, backward_out_pan = self._deinterleave_sequence(backward_out, l)
+
+        # final_x_seq = (forward_out_x + backward_out_x.flip(1)) / 2
+        # final_pan_seq = (forward_out_pan + backward_out_pan.flip(1)) / 2
+        final_x_seq = (forward_out_x + backward_out_x.flip(1)+deformable_out_x) / 3
+        final_pan_seq = (forward_out_pan + backward_out_pan.flip(1)+deformable_out_pan) / 3
+        # final_x_seq = deformable_out_x
+        # final_pan_seq = deformable_out_pan     
+
+        final_x_seq = final_x_seq.permute(0, 2, 1).view(b, c, h, w)  # [B, C, H, W]         
+        final_pan_seq = final_pan_seq.permute(0, 2, 1).view(b, c, h, w)  # [B, C, H, W] 
+
+        return final_x_seq,final_pan_seq
 
 class SingleMambaBlock1(nn.Module):
     def __init__(self, dim):
@@ -932,20 +1089,24 @@ class TokenSwapMamba(nn.Module):
 class CrossMamba(nn.Module):
     def __init__(self, dim):
         super(CrossMamba, self).__init__()
-        self.cross_mamba = CrossDeformableStateSpaceModel(dim)
+        self.cross_mamba = CDeformableStateSpaceModel(dim)
         self.norm1 = LayerNorm(dim,'with_bias')
         self.norm2 = LayerNorm(dim,'with_bias')
         self.dwconv = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim)
-    def forward(self,ms,ms_resi,pan):
+        self.dwconv2 = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim)
+    def forward(self,ms,pan,ms_resi,pan_resi):
         ms_resi = ms+ms_resi
+        pan_resi = pan+pan_resi
         ms = self.norm1(ms_resi)
-        pan = self.norm2(pan)
-        global_f = self.cross_mamba(ms,pan)
+        pan = self.norm2(pan_resi)
+        ms,pan = self.cross_mamba(ms,pan)
         # B,HW,C = global_f.shape
         # ms = global_f.transpose(1, 2).view(B, C, 128, 128) 
         # ms =  (self.dwconv(ms)+ms).flatten(2).transpose(1, 2)
-        ms =  (self.dwconv(global_f)+global_f)
-        return ms,ms_resi
+        ms =  (self.dwconv(ms)+ms)
+        pan =  (self.dwconv2(pan)+pan)
+
+        return ms,pan,ms_resi,pan_resi
 
 class HinResBlock(nn.Module):
     def __init__(self, in_size, out_size, relu_slope=0.2, use_HIN=True):
@@ -1000,37 +1161,32 @@ class Net(nn.Module):
         self.shallow_fusion2 = nn.Conv2d(base_filter*2,base_filter,3,1,1)
         self.ms_to_token = PatchEmbed(in_chans=base_filter,embed_dim=self.embed_dim,patch_size=self.patch_size,stride=self.stride)
         self.pan_to_token = PatchEmbed(in_chans=base_filter,embed_dim=self.embed_dim,patch_size=self.patch_size,stride=self.stride)
-        self.deep_fusion1 = CrossMamba1(self.embed_dim)
-        self.deep_fusion2 = CrossMamba1(self.embed_dim)
-        self.deep_fusion3 = CrossMamba1(self.embed_dim)
-        self.deep_fusion4 = CrossMamba1(self.embed_dim)
-        self.deep_fusion5 = CrossMamba1(self.embed_dim)
-        # self.deep_fusion6 = CrossMamba(self.embed_dim)
-        # self.deep_fusion7 = CrossMamba(self.embed_dim)
-        # self.deep_fusion8 = CrossMamba(self.embed_dim)
-        # self.deep_fusion9 = CrossMamba(self.embed_dim)
-        # self.deep_fusion10 = CrossMamba(self.embed_dim)
+        # self.deep_fusion1 = CrossMamba1(self.embed_dim)
+        # self.deep_fusion2 = CrossMamba1(self.embed_dim)
+        # self.deep_fusion3 = CrossMamba1(self.embed_dim)
+        # self.deep_fusion4 = CrossMamba1(self.embed_dim)
+        # self.deep_fusion5 = CrossMamba1(self.embed_dim)
+        self.deep_fusion6 = CrossMamba(self.embed_dim)
+        self.deep_fusion7 = CrossMamba(self.embed_dim)
+        self.deep_fusion8 = CrossMamba(self.embed_dim)
+        self.deep_fusion9 = CrossMamba(self.embed_dim)
+        self.deep_fusion10 = CrossMamba(self.embed_dim)
+        self.deep_fusion11 = CrossMamba(self.embed_dim)
+        self.deep_fusion12 = CrossMamba(self.embed_dim)
+        self.deep_fusion13 = CrossMamba(self.embed_dim)
+        self.deep_fusion14 = CrossMamba(self.embed_dim)
+        self.deep_fusion15 = CrossMamba(self.embed_dim)
         
         # self.pan_feature_extraction = nn.Sequential(*[SingleMambaBlock1(self.embed_dim) for i in range(4)]) 
         # self.ms_feature_extraction = nn.Sequential(*[SingleMambaBlock1(self.embed_dim) for i in range(4)])
 
-        self.pan_feature_extraction2 = nn.Sequential(*[SingleMambaBlock(self.embed_dim) for i in range(8)])
-        self.ms_feature_extraction2 = nn.Sequential(*[SingleMambaBlock(self.embed_dim) for i in range(8)])
+        # self.pan_feature_extraction2 = nn.Sequential(*[SingleMambaBlock(self.embed_dim) for i in range(2)])
+        # self.ms_feature_extraction2 = nn.Sequential(*[SingleMambaBlock(self.embed_dim) for i in range(2)])
         
-        # self.pan_feature_extraction2 = nn.Sequential(*[CrossMambaBlock(self.embed_dim) for i in range(4)])
-        #self.ms_feature_extraction2 = [CrossMambaBlock(self.embed_dim) for _ in range(4)]
-        # self.ms_feature_extraction2 = SingleMambaBlock(self.embed_dim)
-        # self.ms_feature_extraction3 = SingleMambaBlock(self.embed_dim)
-        # self.ms_feature_extraction4 = SingleMambaBlock(self.embed_dim)
-        # self.ms_feature_extraction5 = SingleMambaBlock(self.embed_dim)
-
-        # self.pan_feature_extraction2 = SingleMambaBlock(self.embed_dim)
-        # self.pan_feature_extraction3 = SingleMambaBlock(self.embed_dim)
-        # self.pan_feature_extraction4 = SingleMambaBlock(self.embed_dim)
-        # self.pan_feature_extraction5 = SingleMambaBlock(self.embed_dim)
         #self.swap_mamba1 = TokenSwapMamba1(self.embed_dim)
         #self.swap_mamba2 = TokenSwapMamba1(self.embed_dim)
         self.patchunembe = PatchUnEmbed(base_filter)
+        self.simple_fusion = nn.Conv2d(base_filter*2,base_filter,1,1,0)
         self.output = Refine(base_filter,4)
     def forward(self,ms,_,pan):
         #torch.autograd.set_detect_anomaly(True)
@@ -1047,8 +1203,8 @@ class Net(nn.Module):
         residual_ms_f = 0
         residual_pan_f = 0 
 
-        ms_f, residual_ms_f = self.ms_feature_extraction2([ms_f, residual_ms_f])
-        pan_f, residual_pan_f = self.pan_feature_extraction2([pan_f, residual_pan_f])
+        # ms_f, residual_ms_f = self.ms_feature_extraction2([ms_f, residual_ms_f])
+        # pan_f, residual_pan_f = self.pan_feature_extraction2([pan_f, residual_pan_f])
         
         # ms_f = ms_f.flatten(2).transpose(1, 2)
         # pan_f = pan_f.flatten(2).transpose(1, 2)
@@ -1070,9 +1226,7 @@ class Net(nn.Module):
         #ms_f,residual_ms_f = self.ms_feature_extraction1([ms_f,residual_ms_f]) #mamba feature_extraction ([4, 16384, 32])
         
         #pan_f,residual_pan_f = self.pan_feature_extraction([pan_f,residual_pan_f])
-    
-        
-    
+ 
         # print("ms_f1.shape",ms_f.shape)
         # print("pan_f2.shape",pan_f.shape)
         # print("residual_ms_f1.shape",residual_ms_f.shape)
@@ -1083,29 +1237,35 @@ class Net(nn.Module):
         # pan_f = self.patchunembe(pan_f,(h,w)) #([4, 32, 128, 128])
        
         # print("residual_ms_f2.shape",residual_ms_f.shape)
-        ms_f = self.shallow_fusion1(torch.concat([ms_f,pan_f],dim=1))+ms_f
-        pan_f = self.shallow_fusion2(torch.concat([pan_f,ms_f],dim=1))+pan_f #([4, 32, 128, 128])
+        # ms_f = self.shallow_fusion1(torch.concat([ms_f,pan_f],dim=1))+ms_f
+        # pan_f = self.shallow_fusion2(torch.concat([pan_f,ms_f],dim=1))+pan_f #([4, 32, 128, 128])
         
-        residual_ms_f = 0
-        
-        ms_f = self.ms_to_token(ms_f) # feature flatten ([4, 16384, 32])
-        pan_f = self.pan_to_token(pan_f)
-
-        ms_f,residual_ms_f = self.deep_fusion1(ms_f,residual_ms_f,pan_f)
-        ms_f,residual_ms_f = self.deep_fusion2(ms_f,residual_ms_f,pan_f)
-        ms_f,residual_ms_f = self.deep_fusion3(ms_f,residual_ms_f,pan_f)
-        ms_f,residual_ms_f = self.deep_fusion4(ms_f,residual_ms_f,pan_f)
-        ms_f,residual_ms_f = self.deep_fusion5(ms_f,residual_ms_f,pan_f)
-        
-         
-        ms_f = self.patchunembe(ms_f,(h,w))
         # residual_ms_f = 0
-        # pan_f = self.patchunembe(pan_f,(h,w))
-        # ms_f,residual_ms_f = self.deep_fusion6(ms_f,residual_ms_f,pan_f)
-        # ms_f,residual_ms_f = self.deep_fusion7(ms_f,residual_ms_f,pan_f)
-        # ms_f,residual_ms_f = self.deep_fusion8(ms_f,residual_ms_f,pan_f)
-        # ms_f,residual_ms_f = self.deep_fusion9(ms_f,residual_ms_f,pan_f)
-        # ms_f,residual_ms_f = self.deep_fusion10(ms_f,residual_ms_f,pan_f)
+        # ms_f = self.ms_to_token(ms_f) # feature flatten ([4, 16384, 32])
+        # pan_f = self.pan_to_token(pan_f)
+
+        # ms_f,residual_ms_f = self.deep_fusion1(ms_f,residual_ms_f,pan_f)
+        # ms_f,residual_ms_f = self.deep_fusion2(ms_f,residual_ms_f,pan_f)
+        # ms_f,residual_ms_f = self.deep_fusion3(ms_f,residual_ms_f,pan_f)
+        # ms_f,residual_ms_f = self.deep_fusion4(ms_f,residual_ms_f,pan_f)
+        # ms_f,residual_ms_f = self.deep_fusion5(ms_f,residual_ms_f,pan_f)
+        #ms_f = self.patchunembe(ms_f,(h,w))
+
+        residual_ms_f = 0
+        residual_pan_f = 0 
+        ms_f,pan_f,residual_ms_f,residual_pan_f = self.deep_fusion6(ms_f,pan_f,residual_ms_f,residual_pan_f)
+        ms_f,pan_f,residual_ms_f,residual_pan_f = self.deep_fusion7(ms_f,pan_f,residual_ms_f,residual_pan_f)
+        ms_f,pan_f,residual_ms_f,residual_pan_f = self.deep_fusion8(ms_f,pan_f,residual_ms_f,residual_pan_f)
+        ms_f,pan_f,residual_ms_f,residual_pan_f = self.deep_fusion9(ms_f,pan_f,residual_ms_f,residual_pan_f)
+        ms_f,pan_f,residual_ms_f,residual_pan_f = self.deep_fusion10(ms_f,pan_f,residual_ms_f,residual_pan_f)
+        ms_f,pan_f,residual_ms_f,residual_pan_f = self.deep_fusion11(ms_f,pan_f,residual_ms_f,residual_pan_f)
+        ms_f,pan_f,residual_ms_f,residual_pan_f = self.deep_fusion12(ms_f,pan_f,residual_ms_f,residual_pan_f)
+        ms_f,pan_f,residual_ms_f,residual_pan_f = self.deep_fusion13(ms_f,pan_f,residual_ms_f,residual_pan_f)
+        ms_f,pan_f,residual_ms_f,residual_pan_f = self.deep_fusion14(ms_f,pan_f,residual_ms_f,residual_pan_f)
+        ms_f,pan_f,residual_ms_f,residual_pan_f = self.deep_fusion15(ms_f,pan_f,residual_ms_f,residual_pan_f)
+        
+        ms_f = self.simple_fusion(torch.concat([ms_f,pan_f],dim=1))
+
         hrms = self.output(ms_f)+ms_bic
         return hrms
 
